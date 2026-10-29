@@ -1,0 +1,20 @@
+{
+  "name": "pulumi-guestbook-monitoring",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Monitored Pulumi Kubernetes Guestbook example",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "check:dashboard": "node scripts/check-dashboard.cjs",
+    "test": "npm run check:dashboard && npm run build"
+  },
+  "dependencies": {
+    "@pulumi/kubernetes": "^4.34.2",
+    "@pulumi/pulumi": "^3.228.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.14",
+    "typescript": "^5.8.3"
+  },
+  "license": "MIT"
+}

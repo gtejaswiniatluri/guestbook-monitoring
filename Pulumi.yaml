@@ -1,0 +1,3 @@
+name: guestbook-monitoring
+runtime: nodejs
+description: Pulumi Kubernetes Guestbook with Prometheus, Grafana, Redis exporters, frontend probing, and a dashboard
