@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: traffic-generator
+  namespace: guestbook
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: traffic-generator
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: generator
+        image: curlimages/curl:8.5.0
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          echo "=== Starting Guestbook Traffic Generator ==="
+          echo "Target: http://frontend.guestbook.svc.cluster.local/"
+          echo "Generating continuous traffic for ~10 minutes..."
+          
+          COUNT=0
+          TOTAL=6000
+          
+          while [ "$COUNT" -lt "$TOTAL" ]; do
+            # 1. Write to Redis leader
+            curl -s "http://frontend.guestbook.svc.cluster.local/guestbook.php?cmd=set&key=messages&value=msg-$COUNT,visit-$((COUNT % 50))" > /dev/null
+            
+            # 2. Read from Redis replica
+            curl -s "http://frontend.guestbook.svc.cluster.local/guestbook.php?cmd=get&key=messages" > /dev/null
+            
+            # 3. Hit frontend homepage (PHP & cAdvisor metrics)
+            curl -s "http://frontend.guestbook.svc.cluster.local/" > /dev/null
+            
+            COUNT=$((COUNT + 1))
+            if [ $((COUNT % 25)) -eq 0 ]; then
+              echo "[Traffic] Sent $COUNT request cycles..."
+            fi
+            sleep 0.1
+          done
+          
+          echo "=== Completed $COUNT traffic cycles ==="

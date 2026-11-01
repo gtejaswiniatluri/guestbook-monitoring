@@ -8,30 +8,55 @@ This is a self-contained monitoring extension of Pulumi's [Kubernetes Guestbook 
 
 ## Architecture
 
-```text
-Users --> frontend Service (port 80) --> 3 PHP frontend pods
-                                          |  reads/writes
-                                          v
-                     redis-leader Service + redis-replica Service
-                              |                   |
-                     Redis + exporter      Redis + exporter
-                              | /metrics            | /metrics
-                              +---------+-----------+
-                                        |
-                                 ServiceMonitors
-                                        |
-Prometheus <----------------------------+
-    ^
-    |  /probe?module=http_2xx&target=http://frontend.guestbook.svc.cluster.local/
-  blackbox-exporter  (HTTP availability / response duration)
-    ^
-    |  ServiceMonitor
-    |
-Prometheus also scrapes kubelet/cAdvisor for frontend CPU/memory
-    |
-    +--> Grafana's preconfigured Prometheus data source
-              |
-              +--> provisioned 'Guestbook Overview' dashboard
+```mermaid
+flowchart TD
+    subgraph Client["Users"]
+        User["User / Web Browser"]
+    end
+
+    subgraph GuestbookNS["Namespace: guestbook (Application)"]
+        FrontendSvc["frontend Service (Port 80)"]
+        FrontendPods["PHP Frontend (3 Replicas)"]
+        
+        LeaderSvc["redis-leader Service (:6379, :9121)"]
+        LeaderPod["Redis Leader Pod\n(Redis 7.4 + Exporter :9121)"]
+        
+        ReplicaSvc["redis-replica Service (:6379, :9121)"]
+        ReplicaPod["Redis Replica Pod\n(Redis 7.4 + Exporter :9121)"]
+    end
+
+    subgraph MonitoringNS["Namespace: monitoring (kube-prometheus-stack)"]
+        Blackbox["Blackbox Exporter (:9115)"]
+        Prometheus["Prometheus Server (:9090)"]
+        Grafana["Grafana Server (:3000)"]
+        Dashboard["Dashboard: Guestbook Overview"]
+    end
+
+    subgraph Cluster["Cluster Infrastructure"]
+        Cadvisor["kubelet / cAdvisor"]
+    end
+
+    %% User & Application Traffic Flow
+    User -->|HTTP Requests| FrontendSvc
+    FrontendSvc --> FrontendPods
+    FrontendPods -->|Writes| LeaderSvc
+    LeaderSvc --> LeaderPod
+    FrontendPods -->|Reads| ReplicaSvc
+    ReplicaSvc --> ReplicaPod
+    LeaderPod -.->|Data Replication| ReplicaPod
+
+    %% Synthetic Probing
+    Blackbox -->|1. Synthetic HTTP Probe| FrontendSvc
+
+    %% Prometheus Scraping via ServiceMonitors
+    Prometheus -->|2. Scrapes Probe Results| Blackbox
+    Prometheus -->|3. Scrapes Redis Metrics| LeaderPod
+    Prometheus -->|4. Scrapes Redis Metrics| ReplicaPod
+    Prometheus -->|5. Scrapes CPU & Memory| Cadvisor
+
+    %% Visualization Flow
+    Prometheus -->|PromQL Datasource| Grafana
+    Grafana -->|Renders Panels| Dashboard
 ```
 
 ### Metrics covered
@@ -193,6 +218,8 @@ kubectl -n monitoring port-forward svc/guestbook-blackbox 9115:9115
 ```
 
 For a quick smoke test of dashboards, open the Guestbook (port-forward as above) and add a few entries. This generates Redis traffic. You can also use `kubectl -n guestbook get pods` to verify the three frontend replicas are ready.
+
+Alternatively, run `npm run traffic` (or `kubectl apply -f scripts/traffic-job.yaml`) to launch the automated in-cluster traffic generator, which produces sustained read/write load against Redis and the PHP frontend. Stop it anytime with `npm run traffic:stop`.
 
 ## Troubleshooting
 

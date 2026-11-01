@@ -6,7 +6,9 @@
   "scripts": {
     "build": "tsc --noEmit",
     "check:dashboard": "node scripts/check-dashboard.cjs",
-    "test": "npm run check:dashboard && npm run build"
+    "test": "npm run check:dashboard && npm run build",
+    "traffic": "kubectl apply -f scripts/traffic-job.yaml",
+    "traffic:stop": "kubectl -n guestbook delete job traffic-generator --ignore-not-found"
   },
   "dependencies": {
     "@pulumi/kubernetes": "^4.34.2",

@@ -57,7 +57,7 @@ function createRedis(name: "redis-leader" | "redis-replica", image: string) {
                         {
                             name: name === "redis-leader" ? "redis-leader" : "replica",
                             image,
-                            env: name === "redis-replica" ? [{ name: "GET_HOSTS_FROM", value: "dns" }] : [],
+                            command: name === "redis-replica" ? ["redis-server", "--replicaof", "redis-leader", "6379"] : undefined,
                             ports: [{ containerPort: 6379, name: "redis" }],
                             resources: { requests: { cpu: "100m", memory: "100Mi" } },
                         },
@@ -83,7 +83,7 @@ function createRedis(name: "redis-leader" | "redis-replica", image: string) {
 }
 
 const leader = createRedis("redis-leader", "redis:7.4-alpine");
-const replica = createRedis("redis-replica", "pulumi/guestbook-redis-replica");
+const replica = createRedis("redis-replica", "redis:7.4-alpine");
 
 const frontendLabels = { app: "frontend" };
 const frontendDeployment = new k8s.apps.v1.Deployment("frontend-deployment", {
@@ -130,6 +130,14 @@ const monitoring = new k8s.helm.v3.Release("monitoring-stack", {
             enabled: true,
             adminUser,
             adminPassword,
+            "grafana.ini": {
+                plugins: {
+                    preinstall_auto_update: false,
+                },
+                analytics: {
+                    check_for_updates: false,
+                },
+            },
             service: {
                 type: grafanaServiceType,
                 ...(grafanaServiceType === "NodePort" ? { nodePort } : {}),
