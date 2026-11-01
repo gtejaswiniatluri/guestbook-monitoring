@@ -4,6 +4,8 @@ Extends the upstream [Pulumi Kubernetes Guestbook](https://github.com/pulumi/exa
 
 Verified end-to-end on **Minikube** (the instructions below).
 
+![Grafana dashboard showing live Guestbook metrics](screenshots/05-grafana-dashboard.png)
+
 ---
 
 ## What Gets Deployed
@@ -138,6 +140,8 @@ frontendPortForward  : kubectl -n guestbook port-forward svc/frontend 8080:80
 prometheusPortForward: kubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090
 ```
 
+![Pulumi stack outputs showing all deployment details](screenshots/01-pulumi-stack-outputs.png)
+
 Retrieve them at any time:
 
 ```bash
@@ -173,6 +177,8 @@ kubectl -n guestbook port-forward svc/frontend 8080:80
 
 Open **http://localhost:8080** and submit a few entries. Each entry is a Redis write and read — you'll see the traffic reflected in Grafana within ~30 seconds.
 
+![Guestbook app running at localhost:8080](screenshots/02-guestbook-app.png)
+
 ---
 
 ## Grafana Dashboard
@@ -191,7 +197,11 @@ It has 7 panels:
 | Frontend memory (bytes) | `sum(container_memory_working_set_bytes{...})` |
 | Redis memory used | `sum(redis_memory_used_bytes{...}) by (job)` |
 
+![Guestbook Overview dashboard with live metrics](screenshots/05-grafana-dashboard.png)
+
 > Rate-based panels (commands/sec, CPU) need ~5 minutes of samples before showing a line.
+
+![Frontend CPU panel drilled down — 1 hour of data](screenshots/06-grafana-panel-cpu.png)
 
 ### Generate traffic to populate the dashboard
 
@@ -230,6 +240,8 @@ kubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 909
 
 Open **http://localhost:9090/targets** — search for `guestbook`. All three targets should show **State: UP**.
 
+![Prometheus targets showing active scraping](screenshots/03-prometheus-targets.png)
+
 ### 3. Run PromQL queries to confirm data is flowing
 
 In the Prometheus expression browser (**http://localhost:9090**) or Grafana's Explore tab:
@@ -254,6 +266,8 @@ sum(container_memory_working_set_bytes{namespace="guestbook",container="frontend
 ```
 
 All `up` values and `probe_success` should return **1** when healthy.
+
+![PromQL query returning Redis commands processed in Prometheus](screenshots/04-prometheus-query.png)
 
 ### 4. Verify exporter endpoints directly
 
