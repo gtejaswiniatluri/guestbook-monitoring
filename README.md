@@ -1,10 +1,32 @@
 # Guestbook + Prometheus + Grafana (Pulumi / TypeScript)
 
-This is a self-contained monitoring extension of Pulumi's [Kubernetes Guestbook `simple` example](https://github.com/pulumi/examples/blob/master/kubernetes-ts-guestbook/simple/index.ts). It deploys the original three-tier PHP/Redis Guestbook **plus** Prometheus, Grafana, Redis metrics exporters, a frontend HTTP probe, and a provisioned Grafana dashboard. The original upstream README is [here](https://github.com/pulumi/examples/blob/master/kubernetes-ts-guestbook/README.md).
+Extends the upstream [Pulumi Kubernetes Guestbook](https://github.com/pulumi/examples/blob/master/kubernetes-ts-guestbook/simple/index.ts) with a full monitoring stack: Prometheus, Grafana, Redis metrics exporters, a blackbox HTTP probe, and a pre-provisioned Grafana dashboard — all deployed via a single `pulumi up`.
 
-> **Status:** TypeScript syntax and dashboard JSON were checked locally. Dependencies could not be installed here, so full TypeScript type-checking and a real `pulumi up` deployment have **not** been verified.
+Verified end-to-end on **Minikube** (the instructions below).
 
-**Start here:** This README contains deployment instructions, monitoring verification, and submission details. A separate optional candidate walkthrough is provided outside the submission ZIP.
+---
+
+## What Gets Deployed
+
+| Namespace | Resources |
+|---|---|
+| `guestbook` | PHP Frontend (3 replicas), Redis Leader + Replica, each with a `redis_exporter` sidecar |
+| `monitoring` | kube-prometheus-stack (Prometheus + Grafana + kube-state-metrics + node-exporter), Blackbox Exporter, Grafana Dashboard ConfigMap |
+
+### Metrics collected
+
+| Signal | How | Example PromQL |
+|---|---|---|
+| Frontend availability | Blackbox HTTP probe | `probe_success{job="guestbook-blackbox"}` |
+| Frontend latency | Blackbox HTTP probe | `probe_duration_seconds{job="guestbook-blackbox"}` |
+| Frontend CPU | kubelet / cAdvisor | `sum(rate(container_cpu_usage_seconds_total{namespace="guestbook",container="frontend"}[5m]))` |
+| Frontend memory | kubelet / cAdvisor | `sum(container_memory_working_set_bytes{namespace="guestbook",container="frontend"})` |
+| Redis leader throughput | `redis_exporter` sidecar on port 9121 | `rate(redis_commands_processed_total{job="redis-leader"}[5m])` |
+| Redis replica throughput | `redis_exporter` sidecar on port 9121 | `rate(redis_commands_processed_total{job="redis-replica"}[5m])` |
+
+> **Note on frontend metrics:** The PHP frontend has no built-in HTTP request counter. Availability and latency come from the synthetic Blackbox probe; CPU/memory come from cAdvisor. Real request-rate metrics would require instrumenting the PHP app or adding a proxy sidecar.
+
+---
 
 ## Architecture
 
@@ -14,238 +36,295 @@ flowchart TD
         User["User / Web Browser"]
     end
 
-    subgraph GuestbookNS["Namespace: guestbook (Application)"]
-        FrontendSvc["frontend Service (Port 80)"]
-        FrontendPods["PHP Frontend (3 Replicas)"]
-        
-        LeaderSvc["redis-leader Service (:6379, :9121)"]
-        LeaderPod["Redis Leader Pod\n(Redis 7.4 + Exporter :9121)"]
-        
-        ReplicaSvc["redis-replica Service (:6379, :9121)"]
-        ReplicaPod["Redis Replica Pod\n(Redis 7.4 + Exporter :9121)"]
+    subgraph GuestbookNS["Namespace: guestbook"]
+        FrontendSvc["frontend Service :80"]
+        FrontendPods["PHP Frontend\n(3 Replicas)"]
+        LeaderSvc["redis-leader Service\n:6379  :9121"]
+        LeaderPod["Redis Leader\n+ redis_exporter :9121"]
+        ReplicaSvc["redis-replica Service\n:6379  :9121"]
+        ReplicaPod["Redis Replica\n+ redis_exporter :9121"]
     end
 
-    subgraph MonitoringNS["Namespace: monitoring (kube-prometheus-stack)"]
-        Blackbox["Blackbox Exporter (:9115)"]
-        Prometheus["Prometheus Server (:9090)"]
-        Grafana["Grafana Server (:3000)"]
+    subgraph MonitoringNS["Namespace: monitoring"]
+        Blackbox["Blackbox Exporter :9115"]
+        Prometheus["Prometheus :9090"]
+        Grafana["Grafana :3000"]
         Dashboard["Dashboard: Guestbook Overview"]
     end
 
-    subgraph Cluster["Cluster Infrastructure"]
+    subgraph Infra["Cluster"]
         Cadvisor["kubelet / cAdvisor"]
     end
 
-    %% User & Application Traffic Flow
-    User -->|HTTP Requests| FrontendSvc
+    User -->|HTTP| FrontendSvc
     FrontendSvc --> FrontendPods
-    FrontendPods -->|Writes| LeaderSvc
-    LeaderSvc --> LeaderPod
-    FrontendPods -->|Reads| ReplicaSvc
-    ReplicaSvc --> ReplicaPod
-    LeaderPod -.->|Data Replication| ReplicaPod
+    FrontendPods -->|writes| LeaderSvc --> LeaderPod
+    FrontendPods -->|reads| ReplicaSvc --> ReplicaPod
+    LeaderPod -.->|replication| ReplicaPod
 
-    %% Synthetic Probing
-    Blackbox -->|1. Synthetic HTTP Probe| FrontendSvc
-
-    %% Prometheus Scraping via ServiceMonitors
-    Prometheus -->|2. Scrapes Probe Results| Blackbox
-    Prometheus -->|3. Scrapes Redis Metrics| LeaderPod
-    Prometheus -->|4. Scrapes Redis Metrics| ReplicaPod
-    Prometheus -->|5. Scrapes CPU & Memory| Cadvisor
-
-    %% Visualization Flow
-    Prometheus -->|PromQL Datasource| Grafana
-    Grafana -->|Renders Panels| Dashboard
+    Blackbox -->|synthetic HTTP probe| FrontendSvc
+    Prometheus -->|scrape /probe results| Blackbox
+    Prometheus -->|scrape /metrics| LeaderPod
+    Prometheus -->|scrape /metrics| ReplicaPod
+    Prometheus -->|scrape| Cadvisor
+    Prometheus -->|PromQL datasource| Grafana
+    Grafana --> Dashboard
 ```
 
-### Metrics covered
-
-| Component | How monitored | Example PromQL |
-| --- | --- | --- |
-| Frontend | Blackbox HTTP GET against the frontend Kubernetes Service | `probe_success{job="guestbook-blackbox"}` |
-| Frontend | HTTP probe duration | `probe_duration_seconds{job="guestbook-blackbox"}` |
-| Frontend pods | Kubelet/cAdvisor metrics gathered by kube-prometheus-stack | `container_memory_working_set_bytes{namespace="guestbook",container="frontend"}` |
-| Redis leader | Redis exporter sidecar (port `9121`) exposed through the backend Service | `redis_commands_processed_total{job="redis-leader"}` |
-| Redis replica | Redis exporter sidecar (port `9121`) exposed through the backend Service | `redis_commands_processed_total{job="redis-replica"}` |
-
-**Important limitation:** The original PHP frontend does **not** provide application-level request counters or HTTP error-rate metrics. `probe_success` measures whether a synthetic HTTP request succeeds, not how many users visit the site. The dashboard uses real probe, Redis, and container-resource metrics instead of fabricating request-rate/error-rate data. Real request counters would require modifying the PHP application or placing an instrumented reverse proxy in front of it.
+---
 
 ## Prerequisites
 
-- A working Kubernetes cluster (Kubernetes **1.25+** for the pinned monitoring chart), accessible via `kubectl` with sufficient RBAC to create cluster-scoped resources (Prometheus Operator and CRDs).
-- Node.js 20+ and npm, [Pulumi CLI](https://www.pulumi.com/docs/iac/download-install/), and `kubectl`.
-- Helm 3 is useful for troubleshooting but **not required**: the Pulumi Helm `Release` resource installs the chart.
-- A cluster with approximately 4 vCPUs / 8 GiB RAM is recommended for local testing because the full monitoring stack runs multiple pods.
-- Network access for Helm chart and image pulls.
+- **Minikube** — [install guide](https://minikube.sigs.k8s.io/docs/start/)
+- **Docker** (or another Minikube driver) — [install guide](https://docs.docker.com/get-docker/)
+- **kubectl** — [install guide](https://kubernetes.io/docs/tasks/tools/)
+- **Node.js 20+** and **npm**
+- **Pulumi CLI** — [install guide](https://www.pulumi.com/docs/iac/download-install/)
 
-All resources are created in the **`guestbook`** (application) and **`monitoring`** namespaces. The pinned Helm chart is `kube-prometheus-stack` version **89.2.0**. It also installs node-exporter and kube-state-metrics.
+The monitoring stack runs ~10 pods total. Minikube needs at least **4 vCPUs and 8 GB RAM**.
 
-## Deploy on a cloud Kubernetes cluster
+---
 
-From this directory:
+## Deploy on Minikube
 
-```bash
-npm install
-npm run test
-kubectl cluster-info
-pulumi stack init dev
-
-# Required: set your own password, stored as a Pulumi secret.
-pulumi config set --secret grafanaPassword 'REPLACE_WITH_A_STRONG_UNIQUE_PASSWORD'
-
-# Default service type is LoadBalancer; explicitly set it if desired.
-pulumi config set grafanaServiceType LoadBalancer
-
-pulumi up
-```
-
-A cloud provider must support `LoadBalancer` Services for both the Guestbook frontend and Grafana to have public IPs/hostnames. Their URLs are populated once the provider assigns an address. If a LoadBalancer is assigned later than the initial update, run `pulumi refresh` to update the stored status.
-
-## Deploy on Minikube / a local cluster
+### 1. Start Minikube
 
 ```bash
 minikube start --cpus=4 --memory=8192
+```
+
+### 2. Install dependencies and validate
+
+```bash
 npm install
-npm run test
+npm test          # validates TypeScript compilation + dashboard JSON
+```
+
+### 3. Create the Pulumi stack
+
+```bash
 pulumi stack init dev
-pulumi config set --secret grafanaPassword 'REPLACE_WITH_A_STRONG_UNIQUE_PASSWORD'
+```
+
+### 4. Configure
+
+```bash
+# Set a Grafana admin password (stored encrypted by Pulumi)
+pulumi config set --secret grafanaPassword 'YourStrongPassword123!'
+
+# Tell Pulumi this is a Minikube cluster
 pulumi config set isMinikube true
 pulumi config set grafanaServiceType NodePort
 pulumi config set nodeAddress "$(minikube ip)"
+```
+
+### 5. Deploy
+
+```bash
 pulumi up
 ```
 
-This uses a `ClusterIP` for the frontend and port **30300** as Grafana's `NodePort`. On host OS/network combinations where direct Minikube NodePort access does not work, use the reliable port-forward alternatives below. For kind or k3d, make sure a node IP/port mapping is accessible from the host or use port-forwarding.
+Pulumi will preview the resources and ask for confirmation. Type `yes`. Deployment takes **2–4 minutes** while images are pulled.
 
-## Grafana access details
+When complete, Pulumi outputs:
 
-Pulumi outputs:
+```
+grafanaUrl           : http://<minikube-ip>:30300
+grafanaAdminUser     : admin
+grafanaAdminPassword : [secret]
+guestbookUrl         : http://localhost:8080 (start frontendPortForward first)
+grafanaPortForward   : kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
+frontendPortForward  : kubectl -n guestbook port-forward svc/frontend 8080:80
+prometheusPortForward: kubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090
+```
 
-| Output | Meaning |
-| --- | --- |
-| `grafanaUrl` | `http://<external-ip-or-hostname>` for LoadBalancer or `http://<nodeAddress>:30300` for NodePort |
-| `grafanaAdminUser` | `admin` by default (overridable with `pulumi config set grafanaAdminUser ...`) |
-| `grafanaAdminPassword` | The **secret** `grafanaPassword` you configured, shown only on explicit request |
-| `grafanaDashboard` | Where to find the imported dashboard |
-| `guestbookUrl` | Frontend LoadBalancer URL or local port-forward hint |
-| `grafanaPortForward`, `frontendPortForward`, `prometheusPortForward` | Copy/paste shell commands for temporary local access |
-
-Retrieve them after deployment:
+Retrieve them at any time:
 
 ```bash
 pulumi stack output grafanaUrl
 pulumi stack output grafanaAdminUser
 pulumi stack output grafanaAdminPassword --show-secrets
-pulumi stack output guestbookUrl
 ```
 
-If a LoadBalancer external address is pending, check:
+---
 
-```bash
-kubectl -n monitoring get svc monitoring-grafana
-kubectl -n guestbook get svc frontend
-```
+## Access Grafana
 
-You can access Grafana without any load balancer or public NodePort by running:
+The most reliable way on Minikube (works on all OS/network combinations):
 
 ```bash
 kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
-# Open http://localhost:3000
 ```
 
-Likewise, for the Guestbook:
+Open **http://localhost:3000**
+
+| Field | Value |
+|---|---|
+| Username | `admin` |
+| Password | output of `pulumi stack output grafanaAdminPassword --show-secrets` |
+
+---
+
+## Access the Guestbook
 
 ```bash
 kubectl -n guestbook port-forward svc/frontend 8080:80
-# Open http://localhost:8080 and create a guestbook entry
 ```
 
-Sign in to Grafana with the returned admin username and password. Open **Dashboards → Guestbook Overview**. The datasource is provisioned automatically by the Helm chart. The JSON used for the custom dashboard is in [`dashboards/guestbook.json`](dashboards/guestbook.json).
+Open **http://localhost:8080** and submit a few entries. Each entry is a Redis write and read — you'll see the traffic reflected in Grafana within ~30 seconds.
 
-**Security:** Do not commit real passwords. An internet-facing Grafana LoadBalancer is for demonstration only; restrict exposure with cloud firewall/load-balancer rules, TLS and authentication, or keep Grafana internal and use port forwarding. Prometheus is `ClusterIP` only. The default setup stores monitoring data ephemerally (lab use, not production). The admin password is a Pulumi encrypted/secret stack value; only use `--show-secrets` on a trusted terminal.
+---
 
-## Verify Prometheus scraping
+## Grafana Dashboard
 
-**1. Check workloads and ServiceMonitor custom resources.**
+The **Guestbook Overview** dashboard is auto-provisioned on deployment (no manual import needed). Find it under **Dashboards → Guestbook Overview**.
+
+It has 7 panels:
+
+| Panel | Metric |
+|---|---|
+| Frontend HTTP probe success | `probe_success{job="guestbook-blackbox"}` (1 = healthy) |
+| Frontend probe duration | `probe_duration_seconds{job="guestbook-blackbox"}` |
+| Redis leader commands/sec | `rate(redis_commands_processed_total{job="redis-leader"}[5m])` |
+| Redis replica commands/sec | `rate(redis_commands_processed_total{job="redis-replica"}[5m])` |
+| Frontend CPU (cores) | `sum(rate(container_cpu_usage_seconds_total{...}[5m]))` |
+| Frontend memory (bytes) | `sum(container_memory_working_set_bytes{...})` |
+| Redis memory used | `sum(redis_memory_used_bytes{...}) by (job)` |
+
+> Rate-based panels (commands/sec, CPU) need ~5 minutes of samples before showing a line.
+
+### Generate traffic to populate the dashboard
+
+```bash
+npm run traffic           # deploys an in-cluster traffic generator Job (~10 min of load)
+npm run traffic:stop      # stop it early
+```
+
+Or manually post entries through the Guestbook UI at http://localhost:8080.
+
+---
+
+## Verify Prometheus is Scraping
+
+### 1. Check all pods and ServiceMonitors are ready
 
 ```bash
 kubectl get pods -n guestbook
 kubectl get pods -n monitoring
 kubectl get servicemonitors -A
-kubectl -n guestbook get svc redis-leader redis-replica frontend
 ```
 
-Expected ServiceMonitors include `guestbook/redis-leader-monitor`, `guestbook/redis-replica-monitor` and `monitoring/guestbook-frontend-probe`.
+Expected ServiceMonitors for this app:
 
-**2. Open the Prometheus targets UI.**
+```
+guestbook    redis-leader-monitor
+guestbook    redis-replica-monitor
+monitoring   guestbook-frontend-probe
+```
+
+### 2. Check Prometheus targets
 
 ```bash
 kubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090
-# Open http://localhost:9090/targets
 ```
 
-Search for the targets created by the three Guestbook ServiceMonitors. The two Redis targets and the blackbox frontend target should show **UP** after at least one scrape. If a target is missing, check that the ServiceMonitor selectors match their Services and look at the Prometheus Operator logs.
+Open **http://localhost:9090/targets** — search for `guestbook`. All three targets should show **State: UP**.
 
-**3. Run queries in Prometheus → Explore/Expression browser.**
+### 3. Run PromQL queries to confirm data is flowing
+
+In the Prometheus expression browser (**http://localhost:9090**) or Grafana's Explore tab:
 
 ```promql
+# Scrape health
 up{job="redis-leader"}
 up{job="redis-replica"}
 up{job="guestbook-blackbox"}
+
+# Frontend probe
 probe_success{job="guestbook-blackbox"}
 probe_duration_seconds{job="guestbook-blackbox"}
-redis_commands_processed_total{job="redis-leader"}
+
+# Redis activity
 rate(redis_commands_processed_total{job="redis-leader"}[5m])
+rate(redis_commands_processed_total{job="redis-replica"}[5m])
+
+# Frontend pod resources
 sum(rate(container_cpu_usage_seconds_total{namespace="guestbook",container="frontend"}[5m]))
 sum(container_memory_working_set_bytes{namespace="guestbook",container="frontend"})
 ```
 
-The `up` values and `probe_success` should be **1** when all components are healthy. `up=1` means Prometheus scraped the exporter successfully; `probe_success=1` means the frontend URL itself returned a successful HTTP response. CPU and Redis `rate(...[5m])` need a few minutes of samples before producing lines.
+All `up` values and `probe_success` should return **1** when healthy.
 
-**4. Check exporter endpoints directly if needed.** In a separate terminal:
+### 4. Verify exporter endpoints directly
 
 ```bash
+# Redis metrics
 kubectl -n guestbook port-forward svc/redis-leader 9121:9121
-# Then: curl -s http://localhost:9121/metrics | grep '^redis_up\|^redis_commands_processed_total'
-```
+curl -s http://localhost:9121/metrics | grep '^redis_up\|^redis_commands_processed_total'
 
-In another terminal, check the frontend probe via the blackbox exporter:
-
-```bash
+# Blackbox probe result
 kubectl -n monitoring port-forward svc/guestbook-blackbox 9115:9115
-# Then: curl -s 'http://localhost:9115/probe?module=http_2xx&target=http%3A%2F%2Ffrontend.guestbook.svc.cluster.local%2F' | grep '^probe_success\|^probe_duration_seconds'
+curl -s 'http://localhost:9115/probe?module=http_2xx&target=http://frontend.guestbook.svc.cluster.local/' | grep '^probe_success\|^probe_duration_seconds'
 ```
 
-For a quick smoke test of dashboards, open the Guestbook (port-forward as above) and add a few entries. This generates Redis traffic. You can also use `kubectl -n guestbook get pods` to verify the three frontend replicas are ready.
-
-Alternatively, run `npm run traffic` (or `kubectl apply -f scripts/traffic-job.yaml`) to launch the automated in-cluster traffic generator, which produces sustained read/write load against Redis and the PHP frontend. Stop it anytime with `npm run traffic:stop`.
+---
 
 ## Troubleshooting
 
-- **Chart cannot install / CRD errors:** Ensure Kubernetes is 1.25+ and your `kubectl` identity can create CRDs and cluster roles. The `ServiceMonitor` resources explicitly depend on the Helm release to avoid a first-deploy CRD race.
-- **No LB hostname/IP:** Your cluster may not implement cloud `LoadBalancer` Services. Use `NodePort` with a reachable node IP or use port forwarding.
-- **Redis exporter is UP but `redis_up` is 0:** Check the Redis app container and `REDIS_ADDR=redis://127.0.0.1:6379` sidecar setting.
-- **Frontend probe shows `probe_success=0`:** Check frontend pods are Ready, the frontend Service has endpoints, and Redis is reachable. The probe runs from the `monitoring` namespace against `http://frontend.guestbook.svc.cluster.local/`.
-- **cAdvisor CPU/memory series are absent:** Verify the monitoring stack's kubelet targets are UP. Some managed Kubernetes installations restrict kubelet/cAdvisor scraping; see the cluster's security configuration.
-- **Dashboard not visible:** Check `kubectl -n monitoring get configmap guestbook-grafana-dashboard --show-labels` and Grafana sidecar pod logs; the label `grafana_dashboard=1` enables auto-provisioning.
-- **`npm run build` fails:** Ensure `npm install` completed successfully. TypeScript is checked against the installed Pulumi packages.
+| Symptom | Fix |
+|---|---|
+| Grafana panels show "No data" | Wait 2–3 minutes after deploy. If still empty, run `kubectl -n monitoring rollout restart deploy/monitoring-grafana` — a known Grafana 13 startup race condition with plugin loading can be resolved with a restart. |
+| Prometheus target shows DOWN | Check pod logs: `kubectl -n guestbook logs <redis-pod> -c redis-exporter` |
+| `probe_success=0` | Verify frontend pods are Ready: `kubectl get pods -n guestbook` |
+| NodePort not reachable | Use port-forward instead: `kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80` |
+| CRD errors on first deploy | Ensure Kubernetes 1.25+. ServiceMonitors depend on the Helm release and are created after CRDs. |
+| Redis replica can't sync | Both leader and replica use `redis:7.4-alpine` — mismatched versions cause RDB format errors. |
 
-## Check locally and clean up
+---
+
+## Clean Up
 
 ```bash
-npm run check:dashboard   # validates dashboard JSON shape and expected metric queries
-npm run build             # runs strict TypeScript validation
-pulumi destroy           # removes resources managed by this stack
-pulumi stack rm dev      # optional: deletes the Pulumi stack state
+pulumi destroy          # removes all Kubernetes resources
+pulumi stack rm dev     # removes the Pulumi stack state
+minikube stop           # stops the Minikube VM
 ```
 
-**Note:** Helm generally leaves its `monitoring.coreos.com` CRDs behind on uninstall. For a dedicated disposable cluster, remove them only after checking no other applications depend on them. Namespace deletion/CRD cleanup is not safe for shared clusters.
+> Helm leaves `monitoring.coreos.com` CRDs behind after `pulumi destroy`. On a disposable cluster you can remove them with `kubectl delete crd -l app.kubernetes.io/part-of=kube-prometheus-stack`.
 
-## Implementation references
+---
 
-- [Pulumi Guestbook original (`simple/index.ts`)](https://github.com/pulumi/examples/blob/master/kubernetes-ts-guestbook/simple/index.ts)
-- [Pulumi Kubernetes Helm Release](https://www.pulumi.com/registry/packages/kubernetes/api-docs/helm/v3/release/)
-- [Prometheus community kube-prometheus-stack chart](https://artifacthub.io/packages/helm/prometheus-community/kube-prometheus-stack)
-- [Redis exporter](https://github.com/oliver006/redis_exporter)
+## Repository Structure
+
+```
+.
+├── index.ts                  # Pulumi program — all resources defined here
+├── dashboards/
+│   └── guestbook.json        # Grafana dashboard (auto-provisioned via ConfigMap)
+├── scripts/
+│   ├── check-dashboard.cjs   # Validates dashboard JSON shape and PromQL queries
+│   ├── traffic-job.yaml      # Kubernetes Job that generates sustained load
+│   └── generate-traffic.sh   # Local script to generate load via port-forward
+├── Pulumi.yaml               # Stack name and runtime
+├── package.json              # npm scripts: build, test, traffic, traffic:stop
+└── tsconfig.json             # TypeScript compiler config
+```
+
+## npm Scripts
+
+```bash
+npm test            # TypeScript check + dashboard validation
+npm run build       # TypeScript type-check only
+npm run traffic     # Deploy in-cluster traffic generator
+npm run traffic:stop# Stop traffic generator
+```
+
+---
+
+## References
+
+- [Pulumi Guestbook original](https://github.com/pulumi/examples/blob/master/kubernetes-ts-guestbook/simple/index.ts)
+- [Pulumi Kubernetes Helm Release docs](https://www.pulumi.com/registry/packages/kubernetes/api-docs/helm/v3/release/)
+- [kube-prometheus-stack Helm chart](https://artifacthub.io/packages/helm/prometheus-community/kube-prometheus-stack)
+- [redis_exporter](https://github.com/oliver006/redis_exporter)
 - [Blackbox exporter](https://github.com/prometheus/blackbox_exporter)
